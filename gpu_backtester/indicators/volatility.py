@@ -2,27 +2,21 @@ import pandas as pd
 import numpy as np
 import cudf, cupy
 
-''' Relative Strength Index (RSI) '''
-def rsi(
-    close: cudf.Series | pd.Series,
-    period: int = 14
+''' ATR '''
+def atr(
+    high: cudf.Series | pd.Series, 
+    low: cudf.Series | pd.Series, 
+    close: cudf.Series | pd.Series, 
+    period: int = 14,
 ) -> cudf.Series | pd.Series:
-    # Calculate price changes
-    delta = close.diff(1)
-    
-    # Separate gains and losses
-    gain = delta.where(delta > 0, 0).fillna(0)
-    loss = -delta.where(delta < 0, 0).fillna(0)
-    
-    # Calculate the exponential moving average (Wilder's smoothing)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-    
-    # Calculate Relative Strength (RS)
-    rs = avg_gain / avg_loss
-    
-    # Calculate the RSI
-    # The formula naturally handles the case where avg_loss is 0 (RSI becomes 100)
-    rsi_series = 100 - (100 / (1 + rs))
-    
-    return rsi_series.fillna(0)
+    prev_close = close.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr_df = cudf.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3})
+
+    true_range = tr_df.max(axis=1)
+    atr_series = true_range.ewm(alpha=1/period, adjust=False).mean()
+
+    return atr_series
