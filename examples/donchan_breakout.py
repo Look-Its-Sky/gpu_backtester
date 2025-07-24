@@ -17,6 +17,7 @@ def donchan_strategy(
 
     df['upper_donchian'] = df['high'].rolling(window=donchian_period).max().shift(1)
     df['lower_donchian'] = df['low'].rolling(window=donchian_period).min().shift(1)
+    df['atr'] = ta.atr(df['high'], df['low'], df['close'], period=donchian_period)
     df.dropna(inplace=True)
     
     enter_long = (df['close'] > df['upper_donchian']) 
@@ -34,9 +35,8 @@ def donchan_strategy(
     long_mask = df['enter_long']
     short_mask = df['enter_short']
 
-    long_risk = df['close'] - df['lower_donchian']
-    df['stop_loss'] = df['stop_loss'].mask(long_mask, df['lower_donchian'])
-    df['take_profit'] = df['take_profit'].mask(long_mask, df['close'] + long_risk * rr)
+    df['stop_loss'] = df['stop_loss'].mask(long_mask, df['lower_donchian']) + df['atr']
+    df['take_profit'] = df['take_profit'].mask(long_mask, df['close'] * rr) + df['atr']
 
     short_risk = df['upper_donchian'] - df['close']
     df['stop_loss'] = df['stop_loss'].mask(short_mask, df['upper_donchian'])
