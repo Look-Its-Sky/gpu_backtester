@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-backtester"
+version = "0.1.0"
+authors = [
+  { name="Your Name", email="you@example.com" },
+]
+description = "A fast, GPU-accelerated backtesting library for financial strategies."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy~=2.2",
+    "pandas",
+    "matplotlib",
+    "seaborn"
+]

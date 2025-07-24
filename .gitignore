@@ -1,3 +1,7 @@
 __pycache__/
-strategies/*
+*/strategies/*
 test.py
+*.egg-info
+*.feather
+*.csv
+*.parquet

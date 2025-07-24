@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
 import cudf, cupy
+import gpu_backtester as gbt
+import gpu_backtester.indicators as ta
 from pprint import pprint
-from backtest.performance import backtest
-from indicators.overlap import sma 
 
 def donchan_strategy(
     df: pd.DataFrame | cudf.DataFrame,
@@ -44,20 +44,20 @@ def donchan_strategy(
    
     return df 
 
-# df = cudf.read_feather('BTC_USDT_USDT-1m-futures.feather')
-df = cudf.read_feather('/home/jude/Nextcloud/Fin_data/crypto/BTC_USDT_USDT-1m-futures.feather')
-df.set_index('date', inplace=True)
+if __name__ == "__main__":
+    df = cudf.read_feather('BTC_USDT_USDT-1m-futures.feather')
+    df.set_index('date', inplace=True)
 
-lookback = 60
-params = {
-    'donchian_period': lookback,
-    'rr': 2.0
-}
+    lookback = 60
+    params = {
+        'donchian_period': lookback,
+        'rr': 2.0
+    }
 
-stats, df = backtest(
-    strategy_func=donchan_strategy,
-    df=df,
-    **params
-)
+    stats, df = gbt.backtest(
+        strategy_func=donchan_strategy,
+        df=df,
+        **params
+    )
 
 pprint(stats)
