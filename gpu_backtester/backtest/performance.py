@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import cudf
 import cupy
+import gc
 
 ''' Just a wrapper around the provided strategy '''
 def backtest(
@@ -16,6 +17,7 @@ def backtest(
     df = strategy_func(df=df, **kwargs)
     df = add_trade_outcomes(df, max_bars=max_bars)
     stats = calculate_performance_stats(df, commission_pct=commission_pct)
+    gc.collect()  
 
     return stats, df
 
@@ -77,15 +79,15 @@ def label_outcomes_kernel(
         exit_prices[i] = close[i + trade_duration]
         outcomes[i] = 1 if exit_prices[i] < entry_price else -1
 
-# @cuda.jit(device=True)
+"""
+Wrapper function to apply the GPU-based outcome labeling.
+This version now also returns the exit price for each trade.
+"""
+
 def add_trade_outcomes(
     df: pd.DataFrame, 
     max_bars: int = 999
 ) -> pd.DataFrame:
-    """
-    Wrapper function to apply the GPU-based outcome labeling.
-    This version now also returns the exit price for each trade.
-    """
     high_np = df['high'].values
     low_np = df['low'].values
     close_np = df['close'].values
