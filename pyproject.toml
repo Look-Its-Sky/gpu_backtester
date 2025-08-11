@@ -15,5 +15,6 @@ dependencies = [
     "numpy~=2.2",
     "pandas",
     "matplotlib",
-    "seaborn"
+    "seaborn",
+    "pynvml"
 ]

@@ -5,6 +5,19 @@ import numpy as np
 import cudf
 import cupy
 import gc
+import pynvml
+
+def _get_vram_info():
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    pynvml.nvmlShutdown()
+    return info.free, info.total
+
+def _df_fits_in_vram(df, safety_margin=0.8):
+    free_vram, _ = _get_vram_info()
+    df_size_bytes = df.memory_usage(deep=True).sum()
+    return df_size_bytes < free_vram * safety_margin
 
 ''' Just a wrapper around the provided strategy '''
 def backtest(
@@ -14,6 +27,43 @@ def backtest(
     max_bars: int = 999,
     **kwargs
 ) -> dict:
+
+    # Chunk the df if it doesn't fit in VRAM
+    if not _df_fits_in_vram(df):
+        processed_chunks = []
+        chunksize = 1_000_000  # 1 million rows per chunk
+        
+        # Ensure df is a pandas DataFrame for chunking
+        if isinstance(df, cudf.DataFrame):
+            df = df.to_pandas()
+
+        n_chunks = (len(df) - 1) // chunksize + 1
+
+        for i in range(n_chunks):
+            start = i * chunksize
+            end = start + chunksize
+            chunk_pd = df.iloc[start:end]
+            
+            # Process chunk on GPU
+            chunk_cudf = cudf.from_pandas(chunk_pd)
+            chunk_cudf = strategy_func(df=chunk_cudf, **kwargs)
+            chunk_cudf = add_trade_outcomes(chunk_cudf, max_bars=max_bars)
+            
+            # Keep only columns needed for stats, and store as pandas df
+            cols_to_keep = ['close', 'outcome', 'exit_price', 'enter_long']
+            processed_chunks.append(chunk_cudf[cols_to_keep].to_pandas())
+            
+            # Clean up GPU memory
+            del chunk_cudf
+            gc.collect()
+            cupy.get_default_memory_pool().free_all_blocks()
+
+        # Combine chunks and calculate stats on the full dataset
+        full_processed_df = pd.concat(processed_chunks)
+        stats = calculate_performance_stats(full_processed_df, commission_pct=commission_pct)
+        
+        return stats, None
+
     df = strategy_func(df=df, **kwargs)
     df = add_trade_outcomes(df, max_bars=max_bars)
     stats = calculate_performance_stats(df, commission_pct=commission_pct)
@@ -21,7 +71,7 @@ def backtest(
 
     return stats, df
 
-''' CUDA Kernel to label the outcome and exit price of trades '''
+''' CUDA Kernel to label the outcome and exit price of trades ''' 
 @cuda.jit
 def label_outcomes_kernel(
     high: np.ndarray,
@@ -79,10 +129,10 @@ def label_outcomes_kernel(
         exit_prices[i] = close[i + trade_duration]
         outcomes[i] = 1 if exit_prices[i] < entry_price else -1
 
-"""
+'''
 Wrapper function to apply the GPU-based outcome labeling.
 This version now also returns the exit price for each trade.
-"""
+'''
 
 def add_trade_outcomes(
     df: pd.DataFrame, 
@@ -129,27 +179,39 @@ def add_trade_outcomes(
 
     return df
 
+@njit
+def _calculate_annualization_periods(index_values_as_int: np.ndarray) -> float:
+    """Calculates the number of trading periods in a year."""
+    timedelta_ns = index_values_as_int[-1] - index_values_as_int[0]
+    
+    # Convert nanoseconds to seconds
+    seconds = timedelta_ns / 1_000_000_000
+    
+    if seconds > 0:
+        years = seconds / (365.25 * 24 * 60 * 60)
+        if years > 0:
+            return len(index_values_as_int) / years
+    
+    return (252 * 6.5 * 60)
+
 def calculate_performance_stats(
     df: cudf.DataFrame,
     commission_pct: float = 0.0,
     risk_free_rate: float = 0.0
 ) -> dict:
-    """
-    Calculates key performance statistics, including commission costs.
-    """
     if isinstance(df, pd.DataFrame):
         df = cudf.from_pandas(df)
 
     trades = df[df['outcome'] != 0].copy()
     if trades.empty:
         return {
-            "Total Trades": 0, 
-            "Win Rate (%)": 0, 
+            "Total Trades": 0,
+            "Win Rate (%)": 0,
             "Total Return (%)": 0,
             "Sharpe Ratio": 0, 
-            "Sortino Ratio": 0, 
+            "Sortino Ratio": 0,
             "Max Drawdown (%)": 0,
-            "Profit Factor": 0, 
+            "Profit Factor": 0,
             "Annualization Periods": 0
         }
 
@@ -162,26 +224,20 @@ def calculate_performance_stats(
     returns_df = cudf.DataFrame({'trade_return': trade_returns}, index=trades.index)
     merged_df = df.merge(returns_df, how='left', left_index=True, right_index=True)
     strategy_returns = merged_df['trade_return'].fillna(0.0)
-    
-    pandas_index = df.index.to_pandas()
-    timedelta = pandas_index[-1] - pandas_index[0]
 
-    if hasattr(timedelta, 'total_seconds'):
-        years = timedelta.total_seconds() / (365.25 * 24 * 60 * 60)
-        periods_per_year = (len(df) / years) if years > 0 else (252 * 6.5 * 60)
-    else:
-        print("Warning: DataFrame index is not a DatetimeIndex. Annualization will be based on a default assumption.")
-        periods_per_year = (252 * 6.5 * 60) 
+    # --- Annualization ---
+    periods_per_year = _calculate_annualization_periods(df.index.to_pandas().values.astype(np.int64))
 
+    # --- Aggregate Stats ---
     total_trades = len(trades)
-    wins = trades[trade_returns > 0]
-    losses = trades[trade_returns <= 0]
-    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-    
+    wins = (trade_returns > 0).sum().item()
+    win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+
     gross_profit = strategy_returns[strategy_returns > 0].sum()
     gross_loss = abs(strategy_returns[strategy_returns < 0].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else cupy.inf
 
+    # --- Portfolio-level stats ---
     cumulative_returns = (1 + strategy_returns).cumprod()
     total_return = (cumulative_returns.iloc[-1] - 1) * 100
     
@@ -189,25 +245,23 @@ def calculate_performance_stats(
     drawdown = (cumulative_returns - running_max) / running_max
     max_drawdown = drawdown.min() * 100
     
+    # --- Risk-adjusted returns ---
     per_period_risk_free_rate = (1 + risk_free_rate)**(1/periods_per_year) - 1
     excess_returns = strategy_returns - per_period_risk_free_rate
     mean_excess_return = excess_returns.mean()
-    
-    sharpe_ratio = cupy.float64(0.0)
+ 
     std_dev = excess_returns.std()
-    if std_dev > 0:
-        sharpe_ratio = (mean_excess_return / std_dev) * cupy.sqrt(periods_per_year)
+    sharpe_ratio = (mean_excess_return / std_dev) * cupy.sqrt(periods_per_year) if std_dev > 0 else 0.0
 
-    sortino_ratio = cupy.float64(0.0)
-    downside_returns = cupy.where(excess_returns < 0, excess_returns, 0)
-    squared_downside = downside_returns**2
-    downside_deviation = cupy.sqrt(squared_downside.mean())
-    if downside_deviation > 0:
-        sortino_ratio = (mean_excess_return / downside_deviation) * cupy.sqrt(periods_per_year)
+    downside_dev_returns = excess_returns.copy()
+    downside_dev_returns[downside_dev_returns > 0] = 0.0
+    downside_deviation = cupy.sqrt((downside_dev_returns**2).mean())
 
+    sortino_ratio = (mean_excess_return / downside_deviation) * cupy.sqrt(periods_per_year) if downside_deviation > 0 else 0.0
+        
     return {
         "Total Trades": total_trades,
-        "Win Rate (%)": round(win_rate.item(), 2) if isinstance(win_rate, (cupy.ndarray, cudf.Series)) else round(win_rate, 2),
+        "Win Rate (%)": round(win_rate, 2),
         "Total Return (%)": round(total_return.item(), 2),
         "Profit Factor": round(float(profit_factor), 2) if profit_factor != cupy.inf else 'inf',
         "Max Drawdown (%)": round(max_drawdown.item(), 2),

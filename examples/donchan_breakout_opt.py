@@ -1,10 +1,12 @@
+from gpu_backtester.tools import get_dataframe_chunks
+from pynvml import NVMLError
+from pprint import pprint
 import pandas as pd
 import numpy as np
 import cudf, cupy
 import gpu_backtester as gbt
 import gpu_backtester.indicators as ta
 import os
-from pprint import pprint
 
 def donchan_strategy(
     df: pd.DataFrame | cudf.DataFrame,
@@ -12,6 +14,7 @@ def donchan_strategy(
     rr: float = 2.0
 ):
     rr = float(rr) 
+    donchian_period = int(donchian_period)
 
     if isinstance(df, pd.DataFrame):
         df = cudf.from_pandas(df)
@@ -46,25 +49,23 @@ def donchan_strategy(
     return df 
 
 if __name__ == "__main__":
-    df = cudf.read_feather('2020-2025_GBP_USD_1sec_bid.feather')
+    print("Loading data into pandas DataFrame...")
+    # df = cudf.read_feather('2020-2025_GBP_USD_1sec_bid.feather')
+
+    df = cudf.read_feather('BTC_USDT_USDT-1m-futures.feather')
+    print(f"Full dataset loaded with {len(df):,} rows.")
 
     lookback = 60
     params = {
-        'donchian_period': np.arange(10, 100, 10),
+        'donchian_period': np.arange(10, 100, 5),
         'rr': np.arange(1.0, 3.0, 0.5)
     }
 
-    one_len = "{:,}".format(len(df))
-    total_len = "{:,}".format(len(df) * len(params["donchian_period"]) * len(params["rr"])) 
-
-    # Process and generate heatmap
-    print(f'Processing dataframes with {one_len} bars each for total size for {total_len}')
-    grid = gbt.optimize(
-        strategy_func=donchan_strategy,
+    grid = gbt.optimize_2d(
         df=df,
-        target='Sortino Ratio',
-        params=params
-    )
+        strategy_func=donchan_strategy,
+        params=params,
+        target='Sortino Ratio'
+    ) 
 
-    # Finished grid optimized results
     print(grid)

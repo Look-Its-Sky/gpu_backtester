@@ -4,7 +4,12 @@ import cudf, cupy
 import gpu_backtester as gbt
 import gpu_backtester.indicators as ta
 import os
+from backtesting import Strategy, Backtest
 from pprint import pprint
+
+def atr(high, low, close, period=14):
+    tr = pd.DataFrame(np.vstack([high - low, np.abs(high - close.shift()), np.abs(low - close.shift())]).T).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean().values
 
 def donchan_strategy(
     df: pd.DataFrame | cudf.DataFrame,
@@ -45,21 +50,37 @@ def donchan_strategy(
    
     return df 
 
+class DonchianStrategy(Strategy):
+    donchian_period = 20
+    rr = 2.0
+
+    def init(self):
+        self.upper = self.I(lambda x: pd.Series(x).rolling(self.donchian_period).max().shift(1), self.data.High)
+        self.lower = self.I(lambda x: pd.Series(x).rolling(self.donchian_period).min().shift(1), self.data.Low)
+        # self.atr = self.I(atr, self.data.df.High, self.data.df.Low, self.data.df.Close, self.donchian_period)
+        self.atr = self.I(ta.atr, self.data.df.High, self.data.df.Low, self.data.df.Close)#, self.period)
+
+
+    def next(self):
+        if self.position:
+            return
+
+        if self.data.Close[-1] > self.upper[-1]:
+            self.buy(
+                sl=self.lower[-1] - self.atr[-1],
+                tp=self.data.Close[-1] + (self.data.Close[-1] - self.lower[-1]) * self.rr
+            )
+        elif self.data.Close[-1] < self.lower[-1]:
+            self.sell(
+                sl=self.upper[-1] + self.atr[-1],
+                tp=self.data.Close[-1] - (self.upper[-1] - self.data.Close[-1]) * self.rr
+            )
+
 if __name__ == "__main__":
-    df = cudf.read_feather('BTC_USDT_USDT-1m-futures.feather')
-    # df = cudf.read_feather('2020-2025_GBP_USD_1sec_bid.feather')
-    df.set_index('date', inplace=True)
+    df = pd.read_feather('BTC_USDT_USDT-1m-futures.feather')
+    df.columns = [col.capitalize() for col in df.columns]
+    df.set_index('Date', inplace=True)
 
-    lookback = 60
-    params = {
-        'donchian_period': lookback,
-        'rr': 2.0
-    }
-
-    stats, df = gbt.backtest(
-        strategy_func=donchan_strategy,
-        df=df,
-        **params
-    )
-
-pprint(stats)
+    bt = Backtest(df, DonchianStrategy, cash=100_000, commission=.002)
+    stats = bt.run()
+    pprint(stats)
